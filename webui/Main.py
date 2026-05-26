@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import webbrowser
 from uuid import UUID, uuid4
@@ -64,6 +65,8 @@ if "video_script" not in st.session_state:
     st.session_state["video_script"] = ""
 if "video_terms" not in st.session_state:
     st.session_state["video_terms"] = ""
+if "scene_terms_editor" not in st.session_state:
+    st.session_state["scene_terms_editor"] = []
 if "ui_language" not in st.session_state:
     st.session_state["ui_language"] = config.ui.get("language", system_locale)
 if "local_video_materials" not in st.session_state:
@@ -556,6 +559,37 @@ with left_panel:
         params.video_script = st.text_area(
             tr("Video Script"), value=st.session_state["video_script"], height=280
         )
+        if st.button("Split script into scene keywords", key="split_scene_terms"):
+            sentences = llm.split_script_sentences(params.video_script)
+            scenes = llm.generate_scene_terms(params.video_subject, params.video_script)
+            scene_map = {scene.get("sentence", ""): scene for scene in scenes if isinstance(scene, dict)}
+            st.session_state["scene_terms_editor"] = []
+            for sentence in sentences:
+                scene = scene_map.get(sentence, {})
+                keywords = scene.get("keywords", [])
+                st.session_state["scene_terms_editor"].append(
+                    {
+                        "sentence": sentence,
+                        "keywords": ", ".join(keywords) if isinstance(keywords, list) else "",
+                    }
+                )
+
+        if st.session_state["scene_terms_editor"]:
+            st.caption("Scene-by-scene keywords (editable)")
+            edited_rows = st.data_editor(
+                st.session_state["scene_terms_editor"],
+                use_container_width=True,
+                num_rows="dynamic",
+                key="scene_terms_editor_table",
+            )
+            st.session_state["scene_terms_editor"] = edited_rows
+            merged_keywords = []
+            for row in edited_rows:
+                kws = str(row.get("keywords", "")).strip()
+                if kws:
+                    merged_keywords.extend([k.strip() for k in re.split(r"[,，]", kws) if k.strip()])
+            if merged_keywords:
+                st.session_state["video_terms"] = ", ".join(merged_keywords)
         if st.button(tr("Generate Video Keywords"), key="auto_generate_terms"):
             if not params.video_script:
                 st.error(tr("Please Enter the Video Subject"))

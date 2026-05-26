@@ -1,4 +1,5 @@
 import os
+import math
 import random
 import threading
 from typing import List
@@ -320,34 +321,37 @@ def download_videos_by_scene(
         sentence = (scene.get("sentence") or "").strip()
         keywords = scene.get("keywords", []) or []
         keywords = [kw.strip() for kw in keywords if isinstance(kw, str) and kw.strip()]
-        if not keywords:
+        if not sentence and not keywords:
             continue
 
         scene_chars = len(sentence) if sentence else 1
         target_duration = max(1.0, (scene_chars / total_chars) * max(total_audio_duration, 1.0))
-        scene_duration = 0.0
-        used_urls = set()
-        logger.info(f"scene {idx}: target_duration={target_duration:.2f}s, keywords={keywords}")
+        logger.info(f"scene {idx}: target_duration={target_duration:.2f}s, sentence={sentence}")
 
-        for keyword in keywords:
+        search_queries = [sentence] if sentence else []
+        search_queries.extend(keywords)
+        selected_item = None
+        for query in search_queries:
             video_items = search_videos(
-                search_term=keyword,
-                minimum_duration=max(1, min(max_clip_duration, int(target_duration))),
+                search_term=query,
+                minimum_duration=1,
                 video_aspect=video_aspect,
             )
-            for item in video_items:
-                if item.url in used_urls:
-                    continue
-                saved_video_path = save_video(video_url=item.url, save_dir=material_directory)
-                if not saved_video_path:
-                    continue
-                used_urls.add(item.url)
-                video_paths.append(saved_video_path)
-                scene_duration += min(max_clip_duration, item.duration)
-                if scene_duration >= target_duration:
-                    break
-            if scene_duration >= target_duration:
+            if video_items:
+                selected_item = video_items[0]
+                logger.info(f"scene {idx}: selected first result from query '{query}'")
                 break
+
+        if not selected_item:
+            continue
+
+        saved_video_path = save_video(video_url=selected_item.url, save_dir=material_directory)
+        if not saved_video_path:
+            continue
+
+        repeat_count = max(1, int(math.ceil(target_duration / max(1, max_clip_duration))))
+        for _ in range(repeat_count):
+            video_paths.append(saved_video_path)
 
     logger.success(f"scene-based download completed: {len(video_paths)} videos")
     return video_paths

@@ -208,6 +208,7 @@ def get_scene_video_materials(task_id, params, scene_terms, audio_duration):
     if not scene_terms:
         return []
     logger.info(f"\n\n## downloading scene-based videos from {params.video_source}")
+    params.video_concat_mode = VideoConcatMode.sequential
     return material.download_videos_by_scene(
         task_id=task_id,
         scene_terms=scene_terms,

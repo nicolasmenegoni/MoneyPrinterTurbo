@@ -592,6 +592,79 @@ Please note that you must use English for generating video search terms; Chinese
     return search_terms
 
 
+def split_script_sentences(video_script: str) -> List[str]:
+    script = (video_script or "").strip()
+    if not script:
+        return []
+
+    raw_sentences = re.split(r"(?<=[.!?。！？；;])\s+|\n+", script)
+    sentences = []
+    for sentence in raw_sentences:
+        cleaned = sentence.strip(" \t\r\n-—")
+        if cleaned:
+            sentences.append(cleaned)
+    return sentences
+
+
+def generate_scene_terms(video_subject: str, video_script: str) -> List[dict]:
+    sentences = split_script_sentences(video_script)
+    if not sentences:
+        return []
+
+    prompt = f"""
+# Role: Cinematic Scene Planner for Stock Video Search
+
+You must analyze each sentence and output scene-level semantic metadata.
+
+## Rules
+1. Return ONLY a JSON array.
+2. One item per sentence, preserving the original order.
+3. For each item include:
+   - "sentence": original sentence text
+   - "keywords": 3-5 cinematic English search terms (2-5 words each), specific and visually concrete
+   - "visual_context": short English phrase describing what should be shown
+4. Keywords must avoid generic terms and should include entities/locations/topics from the sentence.
+5. Output language for keywords and visual_context must be English.
+
+## Context
+Video Subject: {video_subject}
+Sentences:
+{json.dumps(sentences, ensure_ascii=False)}
+""".strip()
+
+    response = _generate_response(prompt=prompt)
+    match = re.search(r"\[.*\]", response, re.DOTALL)
+    if not match:
+        logger.warning("failed to generate scene terms: invalid JSON response")
+        return []
+
+    try:
+        scenes = json.loads(match.group())
+    except Exception as exc:
+        logger.warning(f"failed to parse scene terms: {exc}")
+        return []
+
+    if not isinstance(scenes, list):
+        return []
+
+    normalized = []
+    for i, sentence in enumerate(sentences):
+        scene = scenes[i] if i < len(scenes) and isinstance(scenes[i], dict) else {}
+        keywords = scene.get("keywords", [])
+        if not isinstance(keywords, list):
+            keywords = []
+        keywords = [str(k).strip() for k in keywords if str(k).strip()]
+        normalized.append(
+            {
+                "sentence": sentence,
+                "keywords": keywords[:5],
+                "visual_context": str(scene.get("visual_context", "")).strip(),
+            }
+        )
+    logger.success(f"scene terms generated: {len(normalized)} scenes")
+    return normalized
+
+
 if __name__ == "__main__":
     video_subject = "生命的意义是什么"
     script = generate_script(

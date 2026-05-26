@@ -292,6 +292,67 @@ def download_videos(
     return video_paths
 
 
+def download_videos_by_scene(
+    task_id: str,
+    scene_terms: List[dict],
+    source: str = "pexels",
+    video_aspect: VideoAspect = VideoAspect.portrait,
+    total_audio_duration: float = 0.0,
+    max_clip_duration: int = 5,
+) -> List[str]:
+    if not scene_terms:
+        return []
+
+    material_directory = config.app.get("material_directory", "").strip()
+    if material_directory == "task":
+        material_directory = utils.task_dir(task_id)
+    elif material_directory and not os.path.isdir(material_directory):
+        material_directory = ""
+
+    total_chars = sum(len((scene.get("sentence") or "").strip()) for scene in scene_terms)
+    if total_chars <= 0:
+        total_chars = len(scene_terms)
+
+    search_videos = search_videos_pexels if source != "pixabay" else search_videos_pixabay
+    video_paths = []
+
+    for idx, scene in enumerate(scene_terms, start=1):
+        sentence = (scene.get("sentence") or "").strip()
+        keywords = scene.get("keywords", []) or []
+        keywords = [kw.strip() for kw in keywords if isinstance(kw, str) and kw.strip()]
+        if not keywords:
+            continue
+
+        scene_chars = len(sentence) if sentence else 1
+        target_duration = max(1.0, (scene_chars / total_chars) * max(total_audio_duration, 1.0))
+        scene_duration = 0.0
+        used_urls = set()
+        logger.info(f"scene {idx}: target_duration={target_duration:.2f}s, keywords={keywords}")
+
+        for keyword in keywords:
+            video_items = search_videos(
+                search_term=keyword,
+                minimum_duration=max(1, min(max_clip_duration, int(target_duration))),
+                video_aspect=video_aspect,
+            )
+            for item in video_items:
+                if item.url in used_urls:
+                    continue
+                saved_video_path = save_video(video_url=item.url, save_dir=material_directory)
+                if not saved_video_path:
+                    continue
+                used_urls.add(item.url)
+                video_paths.append(saved_video_path)
+                scene_duration += min(max_clip_duration, item.duration)
+                if scene_duration >= target_duration:
+                    break
+            if scene_duration >= target_duration:
+                break
+
+    logger.success(f"scene-based download completed: {len(video_paths)} videos")
+    return video_paths
+
+
 if __name__ == "__main__":
     download_videos(
         "test123", ["Money Exchange Medium"], audio_duration=100, source="pixabay"

@@ -1,5 +1,7 @@
 import os
+import math
 import random
+import re
 import threading
 from typing import List
 from urllib.parse import urlencode
@@ -225,6 +227,48 @@ def save_video(video_url: str, save_dir: str = "") -> str:
     return ""
 
 
+def _is_http_url(value: str) -> bool:
+    return isinstance(value, str) and value.strip().lower().startswith(("http://", "https://"))
+
+
+def _resolve_direct_video_url(url: str, source: str, video_aspect: VideoAspect) -> str:
+    raw_url = (url or "").strip()
+    if not raw_url:
+        return ""
+
+    if raw_url.lower().endswith(".mp4"):
+        return raw_url
+
+    pexels_match = re.search(r"pexels\.com/.*/video/(\d+)", raw_url, re.IGNORECASE)
+    if source == "pexels" and pexels_match:
+        video_id = pexels_match.group(1)
+        api_key = get_api_key("pexels_api_keys")
+        headers = {"Authorization": api_key}
+        details_url = f"https://api.pexels.com/videos/videos/{video_id}"
+        try:
+            resp = requests.get(
+                details_url,
+                headers=headers,
+                proxies=config.proxy,
+                verify=_get_tls_verify(),
+                timeout=(30, 60),
+            ).json()
+            aspect = VideoAspect(video_aspect)
+            target_w, target_h = aspect.to_resolution()
+            candidates = resp.get("video_files", [])
+            if not candidates:
+                return ""
+            candidates = sorted(
+                candidates,
+                key=lambda x: abs(int(x.get("width", 0)) - target_w)
+                + abs(int(x.get("height", 0)) - target_h),
+            )
+            return candidates[0].get("link", "")
+        except Exception as exc:
+            logger.warning(f"failed to resolve pexels page url: {raw_url}, error: {str(exc)}")
+    return ""
+
+
 def download_videos(
     task_id: str,
     search_terms: List[str],
@@ -236,12 +280,27 @@ def download_videos(
 ) -> List[str]:
     valid_video_items = []
     valid_video_urls = []
+    video_paths = []
     found_duration = 0.0
+    material_directory = config.app.get("material_directory", "").strip()
+    if material_directory == "task":
+        material_directory = utils.task_dir(task_id)
+    elif material_directory and not os.path.isdir(material_directory):
+        material_directory = ""
+
     search_videos = search_videos_pexels
     if source == "pixabay":
         search_videos = search_videos_pixabay
 
     for search_term in search_terms:
+        if _is_http_url(search_term):
+            resolved_url = _resolve_direct_video_url(search_term, source, video_aspect)
+            if not resolved_url:
+                resolved_url = search_term.strip()
+            saved_video_path = save_video(video_url=resolved_url, save_dir=material_directory)
+            if saved_video_path:
+                video_paths.append(saved_video_path)
+            continue
         video_items = search_videos(
             search_term=search_term,
             minimum_duration=max_clip_duration,
@@ -258,13 +317,6 @@ def download_videos(
     logger.info(
         f"found total videos: {len(valid_video_items)}, required duration: {audio_duration} seconds, found duration: {found_duration} seconds"
     )
-    video_paths = []
-
-    material_directory = config.app.get("material_directory", "").strip()
-    if material_directory == "task":
-        material_directory = utils.task_dir(task_id)
-    elif material_directory and not os.path.isdir(material_directory):
-        material_directory = ""
 
     if video_contact_mode.value == VideoConcatMode.random.value:
         random.shuffle(valid_video_items)
@@ -289,6 +341,75 @@ def download_videos(
         except Exception as e:
             logger.error(f"failed to download video: {utils.to_json(item)} => {str(e)}")
     logger.success(f"downloaded {len(video_paths)} videos")
+    return video_paths
+
+
+def download_videos_by_scene(
+    task_id: str,
+    scene_terms: List[dict],
+    source: str = "pexels",
+    video_aspect: VideoAspect = VideoAspect.portrait,
+    total_audio_duration: float = 0.0,
+    max_clip_duration: int = 5,
+) -> List[str]:
+    if not scene_terms:
+        return []
+
+    material_directory = config.app.get("material_directory", "").strip()
+    if material_directory == "task":
+        material_directory = utils.task_dir(task_id)
+    elif material_directory and not os.path.isdir(material_directory):
+        material_directory = ""
+
+    total_chars = sum(len((scene.get("sentence") or "").strip()) for scene in scene_terms)
+    if total_chars <= 0:
+        total_chars = len(scene_terms)
+
+    search_videos = search_videos_pexels if source != "pixabay" else search_videos_pixabay
+    video_paths = []
+
+    for idx, scene in enumerate(scene_terms, start=1):
+        sentence = (scene.get("sentence") or "").strip()
+        keywords = scene.get("keywords", []) or []
+        keywords = [kw.strip() for kw in keywords if isinstance(kw, str) and kw.strip()]
+        if not sentence and not keywords:
+            continue
+
+        scene_chars = len(sentence) if sentence else 1
+        target_duration = max(1.0, (scene_chars / total_chars) * max(total_audio_duration, 1.0))
+        logger.info(f"scene {idx}: target_duration={target_duration:.2f}s, sentence={sentence}")
+
+        search_queries = [sentence] if sentence else []
+        search_queries.extend(keywords)
+        selected_item = None
+        for query in search_queries:
+            if _is_http_url(query):
+                direct_url = _resolve_direct_video_url(query, source, video_aspect) or query
+                selected_item = MaterialInfo(provider=source, url=direct_url, duration=max_clip_duration)
+                logger.info(f"scene {idx}: selected direct URL from query '{query}'")
+                break
+            video_items = search_videos(
+                search_term=query,
+                minimum_duration=1,
+                video_aspect=video_aspect,
+            )
+            if video_items:
+                selected_item = video_items[0]
+                logger.info(f"scene {idx}: selected first result from query '{query}'")
+                break
+
+        if not selected_item:
+            continue
+
+        saved_video_path = save_video(video_url=selected_item.url, save_dir=material_directory)
+        if not saved_video_path:
+            continue
+
+        repeat_count = max(1, int(math.ceil(target_duration / max(1, max_clip_duration))))
+        for _ in range(repeat_count):
+            video_paths.append(saved_video_path)
+
+    logger.success(f"scene-based download completed: {len(video_paths)} videos")
     return video_paths
 
 

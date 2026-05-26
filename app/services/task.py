@@ -58,6 +58,16 @@ def generate_terms(task_id, params, video_script):
     return video_terms
 
 
+def generate_scene_terms(params, video_script):
+    logger.info("\n\n## generating scene-level video terms")
+    scenes = llm.generate_scene_terms(
+        video_subject=params.video_subject, video_script=video_script
+    )
+    if scenes:
+        logger.debug(f"scene terms: {utils.to_json(scenes)}")
+    return scenes
+
+
 def save_script_data(task_id, video_script, video_terms, params):
     script_file = path.join(utils.task_dir(task_id), "script.json")
     script_data = {
@@ -194,6 +204,21 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
         return downloaded_videos
 
 
+def get_scene_video_materials(task_id, params, scene_terms, audio_duration):
+    if not scene_terms:
+        return []
+    logger.info(f"\n\n## downloading scene-based videos from {params.video_source}")
+    params.video_concat_mode = VideoConcatMode.sequential
+    return material.download_videos_by_scene(
+        task_id=task_id,
+        scene_terms=scene_terms,
+        source=params.video_source,
+        video_aspect=params.video_aspect,
+        total_audio_duration=audio_duration * params.video_count,
+        max_clip_duration=params.video_clip_duration,
+    )
+
+
 def generate_final_videos(
     task_id, params, downloaded_videos, audio_file, subtitle_path
 ):
@@ -265,8 +290,10 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     # 2. Generate terms
     video_terms = ""
+    scene_terms = []
     if params.video_source != "local":
         video_terms = generate_terms(task_id, params, video_script)
+        scene_terms = generate_scene_terms(params, video_script)
         if not video_terms:
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
             return
@@ -317,9 +344,13 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
     # 5. Get video materials
-    downloaded_videos = get_video_materials(
-        task_id, params, video_terms, audio_duration
+    downloaded_videos = get_scene_video_materials(
+        task_id, params, scene_terms, audio_duration
     )
+    if not downloaded_videos:
+        downloaded_videos = get_video_materials(
+            task_id, params, video_terms, audio_duration
+        )
     if not downloaded_videos:
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return

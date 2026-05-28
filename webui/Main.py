@@ -67,8 +67,6 @@ if "video_terms" not in st.session_state:
     st.session_state["video_terms"] = ""
 if "scene_terms_editor" not in st.session_state:
     st.session_state["scene_terms_editor"] = []
-if "scene_terms_panel_expanded" not in st.session_state:
-    st.session_state["scene_terms_panel_expanded"] = True
 if "ui_language" not in st.session_state:
     st.session_state["ui_language"] = config.ui.get("language", system_locale)
 if "local_video_materials" not in st.session_state:
@@ -577,30 +575,24 @@ with left_panel:
                 )
 
         if st.session_state["scene_terms_editor"]:
-            if st.button("Keep scene editor expanded", key="keep_scene_editor_open"):
-                st.session_state["scene_terms_panel_expanded"] = True
-            with st.expander(
-                "Scene-by-scene keywords (editable)",
-                expanded=st.session_state["scene_terms_panel_expanded"],
-            ):
-                edited_rows = st.data_editor(
-                    st.session_state["scene_terms_editor"],
-                    use_container_width=True,
-                    num_rows="dynamic",
-                    key="scene_terms_editor_table",
-                )
-                if st.button("Apply edited scene keywords", key="apply_scene_terms"):
-                    st.session_state["scene_terms_editor"] = edited_rows
-                    merged_keywords = []
-                    for row in edited_rows:
-                        kws = str(row.get("keywords", "")).strip()
-                        if kws:
-                            merged_keywords.extend(
-                                [k.strip() for k in re.split(r"[,，]", kws) if k.strip()]
-                            )
-                    if merged_keywords:
-                        st.session_state["video_terms"] = ", ".join(merged_keywords)
-                    st.session_state["scene_terms_panel_expanded"] = True
+            st.caption("Scene-by-scene keywords (editable)")
+            edited_rows = st.data_editor(
+                st.session_state["scene_terms_editor"],
+                use_container_width=True,
+                num_rows="dynamic",
+                key="scene_terms_editor_table",
+            )
+            if st.button("Apply edited scene keywords", key="apply_scene_terms"):
+                st.session_state["scene_terms_editor"] = edited_rows
+                merged_keywords = []
+                for row in edited_rows:
+                    kws = str(row.get("keywords", "")).strip()
+                    if kws:
+                        merged_keywords.extend(
+                            [k.strip() for k in re.split(r"[,，]", kws) if k.strip()]
+                        )
+                if merged_keywords:
+                    st.session_state["video_terms"] = ", ".join(merged_keywords)
         if st.button(tr("Generate Video Keywords"), key="auto_generate_terms"):
             if not params.video_script:
                 st.error(tr("Please Enter the Video Subject"))

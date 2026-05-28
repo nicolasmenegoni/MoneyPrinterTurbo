@@ -239,7 +239,11 @@ def _resolve_direct_video_url(url: str, source: str, video_aspect: VideoAspect) 
     if raw_url.lower().endswith(".mp4"):
         return raw_url
 
-    pexels_match = re.search(r"pexels\.com/.*/video/(\d+)", raw_url, re.IGNORECASE)
+    pexels_match = re.search(
+        r"pexels\.com/(?:[^/]+/)?video/(?:[^/]*-)?(\d+)/?",
+        raw_url,
+        re.IGNORECASE,
+    )
     if source == "pexels" and pexels_match:
         video_id = pexels_match.group(1)
         api_key = get_api_key("pexels_api_keys")

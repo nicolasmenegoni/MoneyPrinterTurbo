@@ -1,8 +1,10 @@
 import math
 import os.path
 import re
+import subprocess
 from os import path
 
+from edge_tts import SubMaker
 from loguru import logger
 
 from app.config import config
@@ -80,16 +82,95 @@ def save_script_data(task_id, video_script, video_terms, params):
         f.write(utils.to_json(script_data))
 
 
+def _generate_sentence_audio(task_id, params, video_script):
+    """Generate one TTS file per script sentence, then concatenate them."""
+    sentences = utils.split_string_by_punctuations(video_script.strip())
+    if not sentences:
+        sentences = [video_script.strip()]
+
+    task_dir = utils.task_dir(task_id)
+    audio_file = path.join(task_dir, "audio.mp3")
+    sentence_audio_files = []
+    combined_sub_maker = voice.ensure_legacy_submaker_fields(SubMaker())
+    combined_sub_maker.subs = []
+    combined_sub_maker.offset = []
+
+    current_offset = 0
+    sentence_durations = []
+    parsed_voice_name = voice.parse_voice_name(params.voice_name)
+
+    logger.info(f"generating {len(sentences)} sentence audio file(s)")
+    for index, sentence in enumerate(sentences, start=1):
+        sentence_audio_file = path.join(task_dir, f"audio-sentence-{index:03d}.mp3")
+        sentence_sub_maker = voice.tts(
+            text=sentence,
+            voice_name=parsed_voice_name,
+            voice_rate=params.voice_rate,
+            voice_file=sentence_audio_file,
+            voice_volume=params.voice_volume,
+        )
+        if sentence_sub_maker is None:
+            logger.error(f"failed to generate sentence audio: {index}")
+            return None, None, None, []
+
+        sentence_duration = voice.get_audio_duration(sentence_audio_file)
+        if sentence_duration <= 0:
+            sentence_duration = voice.get_audio_duration(sentence_sub_maker)
+        if sentence_duration <= 0:
+            logger.error(f"failed to get sentence audio duration: {index}")
+            return None, None, None, []
+
+        sentence_audio_files.append(sentence_audio_file)
+
+        sentence_duration_100ns = max(int(sentence_duration * 10000000), 1)
+        sentence_end = current_offset + sentence_duration_100ns
+        combined_sub_maker.subs.append(sentence)
+        combined_sub_maker.offset.append((current_offset, sentence_end))
+        current_offset = sentence_end
+        sentence_durations.append(sentence_duration)
+        logger.info(f"sentence {index} audio duration: {sentence_duration:.2f}s")
+
+    concat_list_file = path.join(task_dir, "audio-sentences.txt")
+    with open(concat_list_file, "w", encoding="utf-8") as fp:
+        for sentence_audio_file in sentence_audio_files:
+            escaped_file = video._escape_ffmpeg_concat_path(
+                os.path.abspath(sentence_audio_file)
+            )
+            fp.write(f"file '{escaped_file}'\n")
+
+    subprocess.run(
+        [
+            video.get_ffmpeg_binary(),
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            concat_list_file,
+            "-c",
+            "copy",
+            audio_file,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    audio_duration = math.ceil(sum(sentence_durations))
+    return audio_file, audio_duration, combined_sub_maker, sentence_durations
+
+
 def generate_audio(task_id, params, video_script):
     '''
     Generate audio for the video script.
     If a custom audio file is provided, it will be used directly.
     There will be no subtitle maker object returned in this case.
-    Otherwise, TTS will be used to generate the audio.
+    Otherwise, TTS will be generated once per sentence and concatenated.
     Returns:
         - audio_file: path to the generated or provided audio file
         - audio_duration: duration of the audio in seconds
         - sub_maker: subtitle maker object if TTS is used, None otherwise
+        - sentence_durations: per-sentence audio durations in seconds
     '''
     logger.info("\n\n## generating audio")
     # /audio 和 /subtitle 请求模型不包含 custom_audio_file，
@@ -102,12 +183,9 @@ def generate_audio(task_id, params, video_script):
             )
         else:
             logger.info("no custom audio file provided, using TTS to generate audio.")
-        audio_file = path.join(utils.task_dir(task_id), "audio.mp3")
-        sub_maker = voice.tts(
-            text=video_script,
-            voice_name=voice.parse_voice_name(params.voice_name),
-            voice_rate=params.voice_rate,
-            voice_file=audio_file,
+
+        audio_file, audio_duration, sub_maker, sentence_durations = _generate_sentence_audio(
+            task_id, params, video_script
         )
         if sub_maker is None:
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
@@ -117,21 +195,20 @@ def generate_audio(task_id, params, video_script):
 2. check if the network is available. If you are in China, it is recommended to use a VPN and enable the global traffic mode.
             """.strip()
             )
-            return None, None, None
-        audio_duration = math.ceil(voice.get_audio_duration(sub_maker))
+            return None, None, None, []
         if audio_duration == 0:
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
             logger.error("failed to get audio duration.")
-            return None, None, None
-        return audio_file, audio_duration, sub_maker
+            return None, None, None, []
+        return audio_file, audio_duration, sub_maker, sentence_durations
     else:
         logger.info(f"using custom audio file: {custom_audio_file}")
         audio_duration = voice.get_audio_duration(custom_audio_file)
         if audio_duration == 0:
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
             logger.error("failed to get audio duration from custom audio file.")
-            return None, None, None
-        return custom_audio_file, audio_duration, None
+            return None, None, None, []
+        return custom_audio_file, audio_duration, None, []
 
 def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     '''
@@ -220,7 +297,7 @@ def get_scene_video_materials(task_id, params, scene_terms, audio_duration):
 
 
 def generate_final_videos(
-    task_id, params, downloaded_videos, audio_file, subtitle_path
+    task_id, params, downloaded_videos, audio_file, subtitle_path, sentence_durations=None
 ):
     final_video_paths = []
     combined_video_paths = []
@@ -245,6 +322,7 @@ def generate_final_videos(
             video_transition_mode=video_transition_mode,
             max_clip_duration=params.video_clip_duration,
             threads=params.n_threads,
+            clip_durations=sentence_durations,
         )
 
         _progress += 50 / params.video_count / 2
@@ -309,7 +387,7 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
 
     # 3. Generate audio
-    audio_file, audio_duration, sub_maker = generate_audio(
+    audio_file, audio_duration, sub_maker, sentence_durations = generate_audio(
         task_id, params, video_script
     )
     if not audio_file:
@@ -325,7 +403,11 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
             progress=100,
             audio_file=audio_file,
         )
-        return {"audio_file": audio_file, "audio_duration": audio_duration}
+        return {
+            "audio_file": audio_file,
+            "audio_duration": audio_duration,
+            "sentence_durations": sentence_durations,
+        }
 
     # 4. Generate subtitle
     subtitle_path = generate_subtitle(
@@ -373,7 +455,7 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     # 6. Generate final videos
     final_video_paths, combined_video_paths = generate_final_videos(
-        task_id, params, downloaded_videos, audio_file, subtitle_path
+        task_id, params, downloaded_videos, audio_file, subtitle_path, sentence_durations
     )
 
     if not final_video_paths:
@@ -406,6 +488,7 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         "terms": video_terms,
         "audio_file": audio_file,
         "audio_duration": audio_duration,
+        "sentence_durations": sentence_durations,
         "subtitle_path": subtitle_path,
         "materials": downloaded_videos,
         "cross_post_results": cross_post_results if cross_post_results else None,
